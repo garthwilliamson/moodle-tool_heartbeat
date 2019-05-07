@@ -22,6 +22,10 @@
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
+use core\session\manager;
+
+require_once(__DIR__ . '/lib.php');
+
 // Make sure varnish doesn't cache this. But it still might so go check it!
 header('Pragma: no-cache');
 header('Cache-Control: private, no-cache, no-store, max-age=0, must-revalidate, proxy-revalidate');
@@ -32,7 +36,6 @@ if (false) {
     print "Server is in MAINTENANCE";
     exit;
 }
-
 
 $fullcheck = false;
 $checksession = false;
@@ -71,7 +74,6 @@ function check_climaintenance($configfile) {
             return true;
         }
     }
-
     return false;
 }
 
@@ -115,6 +117,10 @@ define('ABORT_AFTER_CONFIG_CANCEL', true);
 require($CFG->dirroot . '/lib/setup.php');
 require_once($CFG->libdir.'/filelib.php');
 
+$sessionclass = manager::get_handler_class();
+$sessionclasspatharray = explode('\\', $sessionclass);
+$driver = end($sessionclasspatharray);
+
 if ($fullcheck || $checksession) {
     $c = new curl(array('cache' => false, 'cookie' => true));
     $response = $c->get(new moodle_url('/admin/tool/heartbeat/sessionone.php'));
@@ -123,19 +129,20 @@ if ($fullcheck || $checksession) {
             if ($sessioncheck->latency > 5) {
                 failed("Session latency outside of acceptable range: {$sessioncheck->latency} seconds.");
             }
-            $status .= "Session check OK<br>\n";
+            $status .= "Session check OK, Session Handler: " . $driver . "<br>\n";
         } else {
             failed("Session check FAIL, "
                 . "Request host: {$sessioncheck->requesthost}, "
                 . "Response host: {$sessioncheck->responsehost}, "
-                . "Latency (seconds): {$sessioncheck->latency}");
+                . "Latency (seconds): {$sessioncheck->latency}, "
+                . "Session Handler: " . $driver);
         }
     } else {
         failed('Session check could not be conducted, error connecting to session check URL');
     }
 }
 
-$sessionhandler = (property_exists($CFG, 'session_handler_class') && $CFG->session_handler_class === '\core\session\memcached');
+$sessionhandler = ($sessionclass === '\core\session\memcached');
 $savepath = property_exists($CFG, 'session_memcached_save_path');
 
 if ($sessionhandler && $savepath) {
