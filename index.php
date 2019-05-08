@@ -37,6 +37,7 @@ if (false) {
     exit;
 }
 
+// Default to not include session checks.
 $fullcheck = false;
 $checksession = false;
 
@@ -53,53 +54,17 @@ if (!defined(CLI_SCRIPT)) {
 define('NO_UPGRADE_CHECK', true);
 define('ABORT_AFTER_CONFIG', true);
 
-/**
- * Checks if the command line maintenance mode has been enabled. Skip the config bootstrapping.
- *
- * @param string $configfile The relative path for config.php
- * @return bool True if climaintenance.html is found.
- */
-function check_climaintenance($configfile) {
-    $content = file_get_contents($configfile);
-    $content = preg_replace("#[^!:]//#", "\n//", $content);  // Set comments to be on newlines, replace '//' with '\n//', where // does not start with :
-    $content = preg_replace("/;/", ";\n", $content);         // Split up statements, replace ';' with ';\n'
-    $content = preg_replace("/^[\s]+/m", "", $content);      // Removes all initial whitespace and newlines.
-
-    $re = '/^\$CFG->dataroot\s+=\s+["\'](.*?)["\'];/m';  // Lines starting with $CFG->dataroot
-    preg_match($re, $content, $matches);
-    if (!empty($matches)) {
-        $climaintenance = $matches[count($matches) - 1] . '/climaintenance.html';
-
-        if (file_exists($climaintenance)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 if (check_climaintenance(__DIR__ . '/../../../config.php') === true) {
     print "Server is in MAINTENANCE<br>\n";
     exit;
 }
 
 require_once(__DIR__ . '/../../../config.php');
+
 global $CFG;
 
+// Initialise status message.
 $status = "";
-
-/**
- * Return an error that ELB will pick up
- *
- * @param string $reason
- */
-function failed($reason) {
-    // Status for ELB, will cause ELB to remove instance.
-    header("HTTP/1.0 503 Service unavailable: failed $reason check");
-    // Status for the humans.
-    print "Server is DOWN<br>\n";
-    echo "Failed: $reason";
-    exit;
-}
 
 $testfile = $CFG->dataroot . "/tool_heartbeat.test";
 $size = file_put_contents($testfile, '1');
@@ -119,7 +84,7 @@ require_once($CFG->libdir.'/filelib.php');
 
 $sessionclass = manager::get_handler_class();
 $sessionclasspatharray = explode('\\', $sessionclass);
-$driver = end($sessionclasspatharray);
+$sessiondriver = end($sessionclasspatharray);
 
 if ($fullcheck || $checksession) {
     $c = new curl(array('cache' => false, 'cookie' => true));
@@ -127,25 +92,35 @@ if ($fullcheck || $checksession) {
     if ($sessioncheck = json_decode($response)) {
         if ($sessioncheck->success == 'pass') {
             if ($sessioncheck->latency > 5) {
-                failed("Session latency outside of acceptable range: {$sessioncheck->latency} seconds.");
+                echo "Session latency outside of acceptable range: {$sessioncheck->latency} seconds.";
+                failed($sessiondriver . ' session');
             }
-            $status .= "Session check OK, Session Handler: " . $driver . "<br>\n";
+            $status .= "Session check OK, Session Handler: " . $sessiondriver . "<br>\n";
         } else {
-            failed("Session check FAIL, "
+            echo ("Session check FAIL, "
                 . "Request host: {$sessioncheck->requesthost}, "
                 . "Response host: {$sessioncheck->responsehost}, "
                 . "Latency (seconds): {$sessioncheck->latency}, "
-                . "Session Handler: " . $driver);
+                . "Session Handler: " . $sessiondriver);
+            failed($sessiondriver . ' session');
         }
     } else {
-        failed('Session check could not be conducted, error connecting to session check URL');
+        echo 'Session check could not be conducted, error connecting to session check URL';
+        failed($sessiondriver . ' session');
     }
 }
 
-$sessionhandler = ($sessionclass === '\core\session\memcached');
-$savepath = property_exists($CFG, 'session_memcached_save_path');
+// If we are using Redis, check that it's working explicitly.
+if ($sessiondriver == 'redis') {
+    if (tool_heartbeat_redis_check()) {
+        $status .= "Redis check OKAY</br>\n";
+    } else {
+        failed($sessiondriver . ' session');
+    }
+}
 
-if ($sessionhandler && $savepath) {
+
+if ($sessiondriver == 'memcached' && property_exists($CFG, 'session_memcached_save_path')) {
     require_once($CFG->libdir . '/classes/session/util.php');
     $servers = \core\session\util::connection_string_to_memcache_servers($CFG->session_memcached_save_path);
     try {
@@ -162,7 +137,6 @@ if ($sessionhandler && $savepath) {
         } else {
             failed('sessions memcached');
         }
-
     } catch (Exception $e) {
         failed('sessions memcached');
     } catch (Throwable $e) {
